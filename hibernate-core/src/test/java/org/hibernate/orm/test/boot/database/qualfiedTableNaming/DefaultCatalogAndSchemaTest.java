@@ -546,6 +546,7 @@ public class DefaultCatalogAndSchemaTest
 	}
 
 	@Test
+	@RequiresDialectFeature(feature = DialectFeatureChecks.NotGaussDBMMode.class)
 	public void sequenceGenerator() {
 		org.hibernate.id.enhanced.SequenceStyleGenerator generator = idGenerator(
 				SequenceStyleGenerator.class,
@@ -560,6 +561,7 @@ public class DefaultCatalogAndSchemaTest
 	}
 
 	@Test
+	@RequiresDialectFeature(feature = DialectFeatureChecks.NotGaussDBMMode.class)
 	public void enhancedSequenceGenerator() {
 		org.hibernate.id.enhanced.SequenceStyleGenerator generator = idGenerator(
 				SequenceStyleGenerator.class,
