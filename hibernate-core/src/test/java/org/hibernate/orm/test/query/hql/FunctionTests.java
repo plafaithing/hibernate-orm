@@ -2282,6 +2282,7 @@ public class FunctionTests {
 	@Test
 	@SkipForDialect(dialectClass = AltibaseDialect.class, reason = "local datetime is evaluated in the database local time zone")
 	@SkipForDialect(dialectClass = InformixDialect.class, reason = "The clock in the container likes to get skewed, so to avoid false negatives, skip the test")
+	@SkipForDialect(dialectClass = GaussDBDialect.class, reason = "The clock in the Docker Desktop VM likes to get skewed 3-5s ahead of the host, which exceeds the +/-1s tolerance, so to avoid false negatives (and the SessionFactory rebuild that loses the seeded data), skip the test")
 	public void testExtractFunctionEpochLocalDateTime(SessionFactoryScope scope) {
 		scope.inTransaction(
 				session -> {

@@ -7,9 +7,9 @@ import org.hibernate.dialect.sql.ast.spi.DerivedTableRenderingSupport;
 import org.hibernate.dialect.sql.ast.spi.PaginationRenderingPlan;
 import org.hibernate.dialect.sql.ast.spi.PaginationRenderingSupport;
 import org.hibernate.dialect.sql.ast.spi.InsertConflictRenderingSupport;
-import org.hibernate.dialect.sql.ast.spi.InsertConflictRenderingPlan;
 import org.hibernate.dialect.sql.ast.spi.StandardDerivedTableRenderingSupport;
 import org.hibernate.dialect.sql.ast.spi.StandardInsertConflictRenderingSupport;
+import org.hibernate.dialect.sql.ast.spi.InsertConflictRenderingPlan;
 import org.hibernate.dialect.sql.ast.spi.SelectItemReferenceStrategy;
 import org.hibernate.dialect.sql.ast.spi.TableReferenceAliasContext;
 import org.hibernate.dialect.sql.ast.spi.ValuesRowReferenceStyle;
@@ -124,24 +124,26 @@ public class GaussDBSqlAstTranslator<T extends JdbcOperation> extends PostgreSQL
 			return super.getInsertConflictRenderingSupport();
 		}
 		if ( dialect.isMMode() ) {
-			// M mode (MySQL-compatible): `on duplicate key update nothing` is a syntax error, so
-			// emulate DO NOTHING via self-assignment; proposed-row references use values(col)
-			// because M mode has no implicit `excluded` pseudo-row (MySQL-standard).
+			// M mode (MySQL-compatible): native `on conflict` is a syntax error and
+			// `on duplicate key update nothing` is a syntax error too (probe-verified), so
+			// DO NOTHING is emulated via the self-assignment (`col=values(col)`), which M
+			// accepts even for key columns and reports 1 affected row; DO UPDATE renders
+			// `on duplicate key update col=values(col)`. Note the constraint-violation
+			// suppression emulation is NOT usable here: the M kernel poisons the
+			// transaction on the swallowed duplicate key, like the A kernel (probe-verified).
 			return StandardInsertConflictRenderingSupport.ON_DUPLICATE_KEY_VALUES_FUNCTION;
 		}
-		// A mode (openGauss): the MySQL-family syntax supports the implicit `excluded` pseudo-row, but
-		// A mode rejects updating primary/unique key columns in ON DUPLICATE KEY UPDATE, and the base
-		// self-assignment emulation renders `<first target column>=<first target column>`, which is the
-		// key column for typical inserts. So DO NOTHING (without constraint columns or a predicate) is
-		// emulated through constraint-violation handling instead; anything else renders as
-		// `on duplicate key update`.
+		// A mode (openGauss): native `on conflict` is a syntax error, but `on duplicate key update
+		// nothing` works and reports 0 affected rows like PostgreSQL (probe-verified), so DO NOTHING
+		// renders that. DO UPDATE renders `on duplicate key update col=excluded.col` - the implicit
+		// `excluded` pseudo-row works in A mode, while an INSERT target alias binds to the existing
+		// row (probe-verified: `data=a.data` silently reads the old value, unlike MariaDB where the
+		// alias refers to the proposed row), so the alias must not be used for proposed-row references.
 		return request -> switch ( request.action() ) {
 			case NONE -> new InsertConflictRenderingPlan.None();
-			case DO_NOTHING -> !request.hasConstraintColumns() && request.predicate() == null
-					? new InsertConflictRenderingPlan.ConstraintViolation()
-					: new InsertConflictRenderingPlan.OnDuplicateKey(
-							DoNothingSyntax.SELF_ASSIGNMENT,
-							ValuesRowReferenceStyle.IMPLICIT_EXCLUDED );
+			case DO_NOTHING -> new InsertConflictRenderingPlan.OnDuplicateKey(
+					DoNothingSyntax.NOTHING_KEYWORD,
+					ValuesRowReferenceStyle.IMPLICIT_EXCLUDED );
 			case DO_UPDATE -> new InsertConflictRenderingPlan.OnDuplicateKey(
 					DoNothingSyntax.SELF_ASSIGNMENT,
 					ValuesRowReferenceStyle.IMPLICIT_EXCLUDED );
@@ -163,20 +165,47 @@ public class GaussDBSqlAstTranslator<T extends JdbcOperation> extends PostgreSQL
 
 	@Override
 	protected void renderTableReferenceAlias(String alias, TableReferenceAliasContext context) {
-		if ( context == TableReferenceAliasContext.INSERT_TARGET
-				&& getDialect() instanceof GaussDBDialect g ) {
-			if ( g.isMMode() ) {
-				// M mode (MySQL-compatible) rejects INSERT table aliases entirely
-				// (both `insert into t as a` and `insert into t a` are syntax errors),
-				// so emit nothing. A mode requires the "as" keyword.
+		if ( getDialect() instanceof GaussDBDialect g ) {
+			if ( context == TableReferenceAliasContext.INSERT_TARGET ) {
+				if ( g.isMMode() ) {
+					// M mode (MySQL-compatible) rejects INSERT table aliases entirely
+					// (both `insert into t as a` and `insert into t a` are syntax errors),
+					// so emit nothing. A mode requires the "as" keyword.
+					return;
+				}
+				// GaussDB A mode requires the "as" keyword for inserts
+				appendSql( " as " );
+				append( alias );
 				return;
 			}
-			// GaussDB A mode requires the "as" keyword for inserts
-			appendSql( " as " );
-			append( alias );
-			return;
+			if ( g.isMMode() && "excluded".equals( alias ) ) {
+				// The name `excluded` collides with the M kernel's internal proposed-row
+				// reference ("Table reference excluded is ambiguous", probe-verified), so a
+				// derived table must not be aliased `excluded` in M mode. Proposed-row values
+				// are referenced through values(col) in M mode (see visitColumnReference), so
+				// nothing else resolves against this alias.
+				appendSql( " as excluded_row" );
+				return;
+			}
 		}
 		super.renderTableReferenceAlias( alias, context );
+	}
+
+	@Override
+	public void visitColumnReference(ColumnReference columnReference) {
+		if ( getDialect() instanceof GaussDBDialect g && g.isMMode()
+				&& "excluded".equals( columnReference.getQualifier() ) ) {
+			// M mode (MySQL-compatible) has no implicit `excluded` pseudo-row: proposed-row
+			// values are referenced through values(col). The base translator only applies
+			// this mapping to values-list inserts; extend it to insert-select, where the
+			// multi-table upserts render their source as a select (probe-verified that
+			// values(col) works there, while a raw `excluded.col` is reported ambiguous).
+			appendSql( "values(" );
+			columnReference.appendReadExpression( this, null );
+			appendSql( CLOSE_PARENTHESIS );
+			return;
+		}
+		super.visitColumnReference( columnReference );
 	}
 
 	@Override

@@ -71,14 +71,16 @@ public class InsertConflictTests {
 					).executeUpdate();
 					final var dialect = scope.getSessionFactory().getJdbcServices().getDialect();
 					if ( dialect instanceof MySQLDialect
-							|| dialect instanceof GaussDBDialect ) {
+							|| dialect instanceof GaussDBDialect g && g.isMMode() ) {
 						// Since JDBC set the MySQL CLIENT_FOUND_ROWS flag, the updated count is 1 even if values didn't change
 						// Also see https://dev.mysql.com/doc/refman/8.0/en/insert-on-duplicate.html
-						// GaussDB emulates `on conflict do nothing` via `on duplicate key update col=col`
-						// (in A mode on a non-key column), which also returns 1 on a conflicting row.
+						// GaussDB M mode emulates `on conflict do nothing` via `on duplicate key update
+						// id=values(id)`, which likewise reports 1 affected row for a conflicting row.
 						assertEquals( 1, updated );
 					}
 					else {
+						// GaussDB A mode renders `on duplicate key update nothing`, which reports
+						// 0 affected rows for a conflicting row like PostgreSQL does.
 						assertEquals( 0, updated );
 					}
 					final BasicEntity basicEntity = session.find( BasicEntity.class, 1 );
@@ -105,6 +107,13 @@ public class InsertConflictTests {
 					}
 					else if ( scope.getSessionFactory().getJdbcServices().getDialect() instanceof SybaseASEDialect ) {
 						// Sybase seems to report all matched rows as affected and ignores additional predicates
+						assertEquals( 1, updated );
+					}
+					else if ( scope.getSessionFactory().getJdbcServices().getDialect() instanceof GaussDBDialect g && g.isMMode() ) {
+						// GaussDB M mode emulates `on conflict(id) do nothing` via
+						// `on duplicate key update id=values(id)`, which reports 1 affected row
+						// for a conflicting row (probe-verified); A mode renders
+						// `on duplicate key update nothing` and reports 0 like PostgreSQL.
 						assertEquals( 1, updated );
 					}
 					else {
